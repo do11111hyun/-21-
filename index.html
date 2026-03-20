@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Busan Fireworks Festival - Shinsegae Lightweight</title>
+    <style>
+        body, html {
+            margin: 0; padding: 0; width: 100%; height: 100%;
+            overflow: hidden; background-color: #050505; cursor: crosshair;
+            -webkit-tap-highlight-color: transparent; touch-action: none;
+        }
+        canvas { 
+            display: block; 
+            transform: translateZ(0); /* 하드웨어 가속 유도 */
+            width: 100%; height: 100%;
+        }
+        #ui {
+            position: absolute; bottom: 20px; left: 20px;
+            color: rgba(255,255,255,0.5); font-family: 'Malgun Gothic', sans-serif;
+            pointer-events: none; text-shadow: 1px 1px 2px black; font-size: 0.8rem; z-index: 20;
+        }
+    </style>
+</head>
+<body>
+    <div id="ui">화면을 클릭하여 불꽃을 직접 쏘아보세요</div>
+    <canvas id="canvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+        const offCanvas = document.createElement('canvas');
+        const offCtx = offCanvas.getContext('2d');
+        
+        // --- [최적화] 텍스트 캐시용 캔버스 ---
+        const textCanvas = document.createElement('canvas');
+        const textCtx = textCanvas.getContext('2d');
+
+        let w, h, horizon, bridgeBaseY;
+        let time = 0;
+        let particles = [];
+        let stars = []; 
+        let bridgePath = new Path2D();
+
+        // --- 응원 메시지 설정 (20개 응원 문구 반영) ---
+        let textX = 0;
+        const messages = [
+            "제21회 부산불꽃축제 화이팅! ✨", "우리 가족 모두 건강하고 행복하자! ❤️", "사랑하는 부모님, 오래오래 건강하세요! 🙇‍♂️",
+            "부산의 밤하늘처럼 우리 미래도 빛나길! 🌟", "친구야, 네가 가는 길을 항상 응원해! 🤝", "내년 불꽃축제도 우리 꼭 같이 오자! 😊",
+            "세상에서 가장 아름다운 부산의 밤! 🎇", "힘든 일은 다 잊고 불꽃처럼 터뜨려버려! 🚀", "올해 소망하는 일 다 이루어지길 기원합니다! 🎊",
+            "부산 시민이라 행복합니다! 👍", "사랑해 부산, 영원히 기억될 오늘 밤! ❤️", "우리 아이들 밝게 웃으며 자라나길 🎈",
+            "수고했어 오늘도, 당신은 충분히 빛나요 ✨", "부산불꽃축제, 매년 봐도 감동이에요! 🎆", "지치지 말고 끝까지 화이팅! 💪",
+            "소중한 사람과 함께하는 이 시간이 선물입니다 🎁", "부산의 자존심, 불꽃축제 영원하라! 🏰", "2026년 대박 기원! 모두 꽃길만 걸어요 🏆",
+            "마음속 깊은 곳까지 환해지는 불꽃 쇼! 💎", "당신의 앞날을 진심으로 응원합니다! 🔥"
+        ];
+        
+        let textImgWidth = 0;
+
+        // 곡선 좌표 계산 통합
+        function getCableY(x, t1, t2, tTop, deckTop, ctrlY) {
+            if (x < t1) {
+                let t = x / t1;
+                return (1 - t) * (1 - t) * deckTop + 2 * (1 - t) * t * deckTop + t * t * tTop;
+            } else if (x < t2) {
+                let t = (x - t1) / (t2 - t1);
+                return (1 - t) * (1 - t) * tTop + 2 * (1 - t) * t * ctrlY + t * t * tTop;
+            } else {
+                let t = (x - t2) / (w - t2);
+                return (1 - t) * (1 - t) * tTop + 2 * (1 - t) * t * deckTop + t * t * deckTop;
+            }
+        }
+
+        // --- [최적화] 텍스트를 미리 이미지로 그려두기 ---
+        // 하명하신 디테일 반영 (0.9배 크기, 촘촘한 자간, 1.2배 문장 간격)
+        function cacheText() {
+            const bridgeH = w * 0.25;
+            const deckThickness = bridgeH * 0.1;
+            // 하명하신 텍스트 0.9배 크기 적용
+            const fontSize = deckThickness * 0.8 * 0.9;
+            
+            textCtx.font = `bold ${fontSize}px 'Segoe UI', 'Malgun Gothic', sans-serif`;
+            // 자간 0.6 조절은 기본 폰트 설정으로 해결 (Segoe UI 등은 기본적으로 촘촘함)
+            
+            // [수정] 하명하신 문장 간격 1.2배 적용 (원래 3 spaces * 1.2 = 3.6 spaces. 대략 5 spaces로 설정하여 확실한 간격 확보)
+            const spacer = "     "; // 5 spaces
+            const rollingText = messages.join(spacer) + spacer;
+
+            textImgWidth = textCtx.measureText(rollingText).width;
+            
+            textCanvas.width = textImgWidth;
+            textCanvas.height = deckThickness;
+            
+            // 캔버스 크기가 바뀌면 폰트 설정을 다시 해줘야 함
+            textCtx.font = `bold ${fontSize}px 'Segoe UI', 'Malgun Gothic', sans-serif`;
+            textCtx.fillStyle = "white";
+            textCtx.textAlign = "left";
+            textCtx.textBaseline = "middle";
+            textCtx.fillText(rollingText, 0, deckThickness / 2);
+        }
+
+        function initStars() {
+            stars = [];
+            // 경량화: 별 개수 대폭 축소 (모바일 최적화)
+            const numStars = Math.floor(60 * (w / 1000 + 0.3)); 
+            for(let i=0; i<numStars; i++) { 
+                stars.push({
+                    x: Math.random() * w, y: Math.random() * h * 0.65, 
+                    size: 1 + Math.random() * 2, opacity: Math.random(),
+                    speed: 0.005 + Math.random() * 0.01 
+                });
+            }
+        }
+
+        function buildBridgePath() {
+            bridgePath = new Path2D();
+            
+            bridgeBaseY = h * 0.75; 
+            const bridgeH = w * 0.25; 
+            const deckThickness = bridgeH * 0.1;
+            const deckTop = bridgeBaseY - deckThickness;
+            const deckBot = bridgeBaseY;
+            const pylonH = bridgeH * 0.9;
+            const tTop = deckTop - pylonH;
+            const t1 = w * 0.25;
+            const t2 = w * 0.75;
+            const ctrlY = deckTop + bridgeH * 0.15;
+
+            // 데크
+            bridgePath.moveTo(0, deckTop); bridgePath.lineTo(w, deckTop);
+            bridgePath.moveTo(0, deckBot); bridgePath.lineTo(w, deckBot);
+
+            // 트러스 (지그재그)
+            let step = Math.max(12, w / 40); 
+            for(let x = 0; x < w; x += step) {
+                bridgePath.moveTo(x, deckTop); bridgePath.lineTo(x + step/2, deckBot);
+                bridgePath.moveTo(x + step/2, deckBot); bridgePath.lineTo(x + step, deckTop);
+            }
+
+            let tW = bridgeH * 0.08;
+            bridgePath.rect(t1 - tW/2, tTop, tW, deckBot - tTop);
+            bridgePath.rect(t2 - tW/2, tTop, tW, deckBot - tTop);
+
+            bridgePath.moveTo(0, deckTop);
+            bridgePath.quadraticCurveTo(t1/2, deckTop, t1, tTop); 
+            bridgePath.quadraticCurveTo(w/2, ctrlY, t2, tTop); 
+            bridgePath.quadraticCurveTo(t2 + (w-t2)/2, deckTop, w, deckTop); 
+
+            // 현수재
+            const numHangers = 60;
+            const hStep = w / numHangers;
+            for(let x = 0; x <= w; x += hStep) {
+                if(Math.abs(x-t1) < 10 || Math.abs(x-t2) < 10) continue;
+                let cy = getCableY(x, t1, t2, tTop, deckTop, ctrlY);
+                bridgePath.moveTo(x, cy); bridgePath.lineTo(x, deckTop);
+            }
+        }
+
+        function resize() {
+            w = canvas.width = offCanvas.width = window.innerWidth;
+            h = canvas.height = offCanvas.height = window.innerHeight;
+            horizon = Math.floor(h * 0.75); 
+            if(textX === 0 || textX > w) textX = w;
+            initStars(); buildBridgePath();
+            cacheText(); // 리사이즈 시 텍스트 다시 캐싱
+        }
+
+        function drawRollingText(c, isRef = false) {
+            const bridgeH = w * 0.25;
+            const deckThickness = bridgeH * 0.1;
+            const deckTop = bridgeBaseY - deckThickness;
+            
+            c.save();
+            // 트러스 영역 클리핑 (텍스트가 상하판을 넘지 않게 가두기)
+            if(!isRef) {
+                c.beginPath();
+                c.rect(0, deckTop, w, deckThickness);
+                c.clip();
+            }
+
+            // 하명하신 네온 효과 강도 (75% ~ 90%) & 0.75배 느린 반짝임
+            let neonPulse = 0.75 + Math.abs(Math.sin(time * 0.9)) * 0.15;
+            // 경량화: 반영 이미지는 강도를 더 낮추어 그림자 부담을 줄임
+            c.globalAlpha = isRef ? neonPulse * 0.25 : neonPulse;
+
+            // --- [최적화] 이미지로 그려둔 텍스트를 출력 ---
+            // [수정] 하명하신 속도 0.8배 적용 (기존 1.28 -> 1.024)
+            textX -= 1.024; 
+            if (textX < -textImgWidth) textX = 0;
+
+            // 텍스트 캐시 이미지를 그리기
+            c.drawImage(textCanvas, textX, deckTop);
+            // 루프를 위해 한 장 더 붙여서 그리기
+            if (textX < w - textImgWidth) {
+                c.drawImage(textCanvas, textX + textImgWidth, deckTop);
+            }
+            c.restore();
+        }
+
+        class Particle {
+            constructor(x, y, color, sizeScale) {
+                this.x = x; this.y = y; this.color = color;
+                // [찐 경량화] 불꽃 크기 0.75배 축소
+                this.size = (1.2 + Math.random() * 1.5) * 1.1 * sizeScale * (w/1200 + 0.5) * 0.75; 
+                this.angle = Math.random() * Math.PI * 2;
+                // 속도와 중력 조절하여 작아진 불꽃에 맞는 섬세한 폭발 구현
+                this.speed = (4 + Math.random() * 7) * sizeScale * (w/1500 + 0.5) * 0.75; 
+                this.friction = 0.94; // 더 천천히 멈춤
+                this.gravity = 0.15 * 0.75; 
+                this.opacity = 1; this.fadeRate = 0.007 + Math.random() * 0.01;
+                this.history = []; // 궤적
+            }
+            update() {
+                this.history.push({x: this.x, y: this.y});
+                // 경량화: 꼬리 길이 축소 (메모리 부담 완화)
+                if (this.history.length > 15) this.history.shift();
+                this.speed *= this.friction;
+                this.x += Math.cos(this.angle) * this.speed;
+                this.y += Math.sin(this.angle) * this.speed + this.gravity;
+                this.opacity -= this.fadeRate;
+            }
+            draw(c, isRef = false) {
+                if (this.opacity <= 0 || this.history.length === 0) return;
+                c.save();
+                c.globalAlpha = Math.max(0, this.opacity * (isRef ? 0.3 : 1.0));
+                c.strokeStyle = this.color; c.lineWidth = this.size; c.lineCap = 'round';
+                
+                // [찐 경량화] 불꽃의 shadowBlur 제거! (렉의 주범 박멸)
+                // if(!isRef) { c.shadowColor = this.color; c.shadowBlur = 5; }
+                
+                c.beginPath(); c.moveTo(this.history[0].x, this.history[0].y);
+                for (let p of this.history) c.lineTo(p.x, p.y);
+                c.stroke(); c.restore();
+            }
+        }
+
+        // 터치와 클릭 모두 대응
+        window.addEventListener('pointerdown', (e) => {
+            // [경량화] 파티클 개수 제한 도입 (화면에 최대 500개)
+            if (particles.length > 500) return; 
+
+            const h1 = Math.random() * 360; 
+            const h2 = (h1 + 60 + Math.random() * 240) % 360;
+            const c1 = `hsl(${h1}, 100%, 75%)`, c2 = `hsl(${h2}, 100%, 75%)`;
+            
+            // 랜덤 사이즈는 비율 수호 v2 설정 유지
+            const sizeScale = 1 + Math.random() * 0.5;
+            
+            // [경량화] 한 번 클릭 시 파티클 개수 축소 (경량 최적화)
+            const count = w < 600 ? 40 : 60;
+            for(let i=0; i<count; i++) {
+                particles.push(new Particle(e.clientX, e.clientY, Math.random() < 0.5 ? c1 : c2, sizeScale));
+            }
+        });
+
+        function drawStars() {
+            for(let s of stars) {
+                s.opacity += s.speed; if(s.opacity > 1 || s.opacity < 0) s.speed *= -1;
+                ctx.globalAlpha = Math.max(0, Math.min(1, Math.abs(s.opacity)));
+                ctx.fillStyle = "white"; ctx.beginPath(); ctx.arc(s.x, s.y, s.size/2, 0, Math.PI*2); ctx.fill();
+            }
+            ctx.globalAlpha = 1;
+        }
+
+        function drawBridge(c, isRef = false) {
+            c.save();
+            let hue = (time * 30) % 360;
+            // [찐 경량화] 다리의 shadowBlur 제거! (렉의 주범 박멸)
+            // c.shadowColor = `hsl(${hue}, 100%, 60%)`; c.shadowBlur = isRef ? 15 : 10; 
+            
+            c.strokeStyle = `hsl(${hue}, 100%, 75%)`; c.lineWidth = Math.max(1.5, w * 0.002);
+            c.stroke(bridgePath);
+            
+            // 반영 이미지는 심플하게 표현하여 성능 향상
+            if(!isRef) {
+                c.shadowBlur = 0; c.strokeStyle = "rgba(255, 255, 255, 0.7)"; c.lineWidth = 0.5;
+                c.stroke(bridgePath);
+            }
+            c.restore();
+            
+            // 전광판 텍스트 그리기
+            drawRollingText(c, isRef);
+        }
+
+        function drawOcean() {
+            ctx.fillStyle = "#050a14"; ctx.fillRect(0, horizon, w, h - horizon);
+            
+            // 경량화: 3D 그리드 제거 (메모리 부담 완화)
+            // drawOceanGrid();
+
+            offCtx.clearRect(0, 0, w, h);
+            offCtx.save(); offCtx.translate(0, horizon); offCtx.scale(1, -0.5); offCtx.translate(0, -horizon);
+            drawBridge(offCtx, true);
+            for(let p of particles) p.draw(offCtx, true);
+            offCtx.restore();
+            
+            // 경량화: 바다 조각 gap을 8px로 확대 (성능 향상 유지)
+            const gap = 8;
+            for(let y = horizon; y < h; y += gap) {
+                let prog = (y - horizon) / (h - horizon);
+                let dist = Math.sin(time + y * 0.05) * (1 + prog * 5);
+                ctx.globalAlpha = Math.max(0, 0.5 - prog * 0.4);
+                ctx.drawImage(offCanvas, 0, y, w, gap, dist, y, w, gap);
+            }
+            ctx.globalAlpha = 1;
+        }
+
+        function animate() {
+            ctx.fillStyle = '#050505'; ctx.fillRect(0, 0, w, h);
+            
+            // 경량화: FPS에 맞춰 time 증가폭 조절
+            time += 0.02; 
+
+            drawStars();
+            drawBridge(ctx);
+            drawOcean();
+
+            for(let i = particles.length - 1; i >= 0; i--) {
+                particles[i].update();
+                particles[i].draw(ctx);
+                if(particles[i].opacity <= 0) particles.splice(i, 1);
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        window.onload = () => { resize(); animate(); };
+        window.addEventListener('resize', resize);
+    </script>
+</body>
+</html>
